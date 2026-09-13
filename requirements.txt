@@ -9,3 +9,4 @@ langchain-text-splitters
 langchain-huggingface
 langchain-openai
 openai
+PyPDF2
