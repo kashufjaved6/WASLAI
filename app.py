@@ -1,3 +1,4 @@
+
 import os
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
-from langchain.chains import RetrievalQA
+from langchain_core.prompts import ChatPromptTemplate
 
 
 # --------------------------------------------------
@@ -23,7 +24,7 @@ st.set_page_config(
 
 
 # --------------------------------------------------
-# Read API key safely
+# Read OpenAI API key safely
 # --------------------------------------------------
 
 def get_openai_api_key():
@@ -42,21 +43,13 @@ def get_openai_api_key():
 
 
 # --------------------------------------------------
-# Load documents and create RAG system
+# Read documents from the data folder
 # --------------------------------------------------
 
-@st.cache_resource
-def load_rag():
-
-    data_folder = Path("data")
-
-    if not data_folder.exists():
-        st.error("The 'data' folder was not found.")
-        return None
-
+def read_documents(data_folder):
     documents = []
 
-    for file_path in data_folder.iterdir():
+    for file_path in sorted(data_folder.iterdir()):
 
         # Read PDF files
         if file_path.suffix.lower() == ".pdf":
@@ -64,12 +57,14 @@ def load_rag():
             try:
                 reader = PdfReader(str(file_path))
 
-                document_text = f"\nSOURCE: {file_path.name}\n"
+                document_text = (
+                    f"\nSOURCE: {file_path.name}\n"
+                )
 
                 for page in reader.pages:
-                    page_text = page.extract_text()
+                    page_text = page.extract_text() or ""
 
-                    if page_text:
+                    if page_text.strip():
                         document_text += page_text + "\n"
 
                 if document_text.strip():
@@ -84,16 +79,14 @@ def load_rag():
         elif file_path.suffix.lower() == ".txt":
 
             try:
-                with open(
-                    file_path,
-                    "r",
-                    encoding="utf-8"
-                ) as text_file:
+                text = file_path.read_text(
+                    encoding="utf-8",
+                    errors="ignore"
+                )
 
-                    document_text = (
-                        f"\nSOURCE: {file_path.name}\n"
-                        + text_file.read()
-                    )
+                document_text = (
+                    f"\nSOURCE: {file_path.name}\n{text}"
+                )
 
                 if document_text.strip():
                     documents.append(document_text)
@@ -103,13 +96,26 @@ def load_rag():
                     f"Could not read {file_path.name}: {error}"
                 )
 
-    if not documents:
-        st.error(
-            "No PDF or TXT documents were found in the 'data' folder."
-        )
+    return documents
+
+
+# --------------------------------------------------
+# Load documents and create the vector database
+# --------------------------------------------------
+
+@st.cache_resource
+def load_vectorstore():
+
+    data_folder = Path(__file__).parent / "data"
+
+    if not data_folder.exists():
         return None
 
-    # Split documents into smaller sections
+    documents = read_documents(data_folder)
+
+    if not documents:
+        return None
+
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
         chunk_overlap=100
@@ -119,44 +125,102 @@ def load_rag():
         "\n".join(documents)
     )
 
-    # Create embeddings
+    if not text_chunks:
+        return None
+
     embeddings = HuggingFaceEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
-    # Create FAISS vector database
     vectorstore = FAISS.from_texts(
         text_chunks,
         embedding=embeddings
     )
 
-    # Get OpenAI API key
+    return vectorstore
+
+
+# --------------------------------------------------
+# Create the language model
+# --------------------------------------------------
+
+@st.cache_resource
+def load_llm():
+
     api_key = get_openai_api_key()
 
     if not api_key:
-        st.error(
-            "OPENAI_API_KEY is missing. "
-            "Please add it in Streamlit Secrets."
-        )
         return None
 
-    # Create language model
-    llm = ChatOpenAI(
+    return ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0,
         api_key=api_key
     )
 
-    # Create Retrieval-Augmented Generation chain
-    qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        retriever=vectorstore.as_retriever(
-            search_kwargs={"k": 3}
-        ),
-        return_source_documents=True
+
+# --------------------------------------------------
+# Generate an answer using retrieved documents
+# --------------------------------------------------
+
+def generate_answer(question, vectorstore, llm):
+
+    retrieved_documents = vectorstore.similarity_search(
+        question,
+        k=3
     )
 
-    return qa_chain
+    if not retrieved_documents:
+        return (
+            "I could not find relevant information in the "
+            "uploaded policy documents."
+        ), []
+
+    context_parts = []
+
+    for document in retrieved_documents:
+        context_parts.append(document.page_content)
+
+    context = "\n\n".join(context_parts)
+
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """
+You are WASLAI, an accessibility assistant for students
+with disabilities in Pakistan.
+
+Answer the user's question only from the provided context.
+Do not invent policies, facilities, deadlines, or eligibility
+criteria.
+
+If the context does not contain enough information, clearly say:
+"I could not find this information in the uploaded documents."
+
+Give a clear, simple, and helpful answer.
+Mention that users should verify important policy information
+with the relevant official institution.
+
+Context:
+{context}
+"""
+            ),
+            (
+                "human",
+                "{question}"
+            )
+        ]
+    )
+
+    messages = prompt.format_messages(
+        context=context,
+        question=question
+    )
+
+    response = llm.invoke(messages)
+
+    return response.content, retrieved_documents
 
 
 # --------------------------------------------------
@@ -168,26 +232,43 @@ st.subheader("24/7 AI Voice Mentor for PWD Students")
 
 st.write(
     """
-    WASLAI helps students find information from uploaded
-    HEC, PEC, and disability-policy documents.
-    """
+WASLAI helps students find information from uploaded
+HEC, PEC, NUST, and disability-policy documents.
+"""
 )
 
 st.info(
-    "Ask a question about HEC or PEC disability policies."
+    "Ask a question about accessibility, scholarships, "
+    "or disability-related educational policies."
 )
 
-qa_chain = load_rag()
+vectorstore = load_vectorstore()
+llm = load_llm()
 
+if vectorstore is None:
 
-if qa_chain is not None:
+    st.error(
+        "No readable PDF or TXT documents were found in the "
+        "'data' folder. Please upload your documents."
+    )
+
+elif llm is None:
+
+    st.error(
+        "OPENAI_API_KEY is missing. Please add it in "
+        "Streamlit Secrets."
+    )
+
+else:
 
     question = st.text_input(
         "Enter your question:",
-        placeholder="What facilities are available for PWD students?"
+        placeholder=(
+            "What facilities are available for PWD students?"
+        )
     )
 
-    if st.button("Get Answer"):
+    if st.button("🔍 Get Answer"):
 
         if not question.strip():
 
@@ -195,25 +276,24 @@ if qa_chain is not None:
 
         else:
 
-            with st.spinner("Searching the policy documents..."):
+            with st.spinner(
+                "Searching policy documents and generating an answer..."
+            ):
 
                 try:
-                    result = qa_chain.invoke(
-                        {"query": question}
+                    answer, source_documents = generate_answer(
+                        question,
+                        vectorstore,
+                        llm
                     )
 
                     st.subheader("Answer")
-                    st.success(result["result"])
-
-                    source_documents = result.get(
-                        "source_documents",
-                        []
-                    )
+                    st.success(answer)
 
                     if source_documents:
 
                         with st.expander(
-                            "View document sources"
+                            "📚 View document sources"
                         ):
 
                             for index, document in enumerate(
@@ -232,5 +312,6 @@ if qa_chain is not None:
                 except Exception as error:
 
                     st.error(
-                        f"An error occurred while generating the answer: {error}"
+                        "An error occurred while generating "
+                        f"the answer: {error}"
                     )
