@@ -3,10 +3,9 @@ pypdf
 numpy
 faiss-cpu
 sentence-transformers
-langchain
-langchain-community
 langchain-text-splitters
 langchain-huggingface
+langchain-community
 langchain-openai
+langchain-core
 openai
-PyPDF2
