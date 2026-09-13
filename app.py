@@ -55,7 +55,10 @@ def read_documents(data_folder):
         if file_path.suffix.lower() == ".pdf":
 
             try:
-                reader = PdfReader(str(file_path))
+                reader = PdfReader(
+                    str(file_path),
+                    strict=False
+                )
 
                 document_text = (
                     f"\nSOURCE: {file_path.name}\n"
@@ -72,7 +75,8 @@ def read_documents(data_folder):
 
             except Exception as error:
                 st.warning(
-                    f"Could not read {file_path.name}: {error}"
+                    f"Skipping damaged PDF "
+                    f"{file_path.name}: {error}"
                 )
 
         # Read TXT files
